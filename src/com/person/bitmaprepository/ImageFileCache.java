@@ -1,12 +1,22 @@
 package com.person.bitmaprepository;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import com.person.bitmaprepository.utils.LogUtils;
 
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -14,12 +24,17 @@ import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.Environment;
 import android.os.StatFs;
+import android.text.TextUtils;
 
 public class ImageFileCache {
 	private static final String CACHE_SUFFIX = ".cache";
+	private static final String TEMP_SUFFIX = ".temp";
 	private static final long CACHE_SIZE = 10 * 1024 * 1024;
+	private static final long RETAIN_FACTOR=(long) (CACHE_SIZE*0.6);
 	private static String path = "";
-	private static long cacheSize;
+	private static AtomicLong mCacheSize;
+	private HashMap<String, ReentrantLock> mLockMap;
+	private ReadWriteLock mRWLock;
 
 	public ImageFileCache() {
 		if (Environment.getExternalStorageState().equals(
@@ -30,6 +45,8 @@ public class ImageFileCache {
 			this.setPath(path);
 
 		}
+		mLockMap = new HashMap<String, ReentrantLock>();
+		mRWLock = new ReentrantReadWriteLock();
 		countCacheSize();
 		checkCache();
 	}
@@ -77,12 +94,22 @@ public class ImageFileCache {
 	 * @return
 	 */
 	public Bitmap getImage(String url) {
+		if (TextUtils.isEmpty(url))
+			return null;
 		String filename = url.substring(url.lastIndexOf("/") + 1)
 				+ CACHE_SUFFIX;
-		String filepath = path + "/" + filename;
+		String filepath = path + File.separator + filename;
 		File file = new File(filepath);
 		if (file.exists()) {
-			Bitmap bmp = BitmapFactory.decodeFile(filepath);
+			Bitmap bmp = null;
+			try {
+				bmp = BitmapFactory.decodeStream(new FileInputStream(file));
+			LogUtils.info("hit filecahe");
+			} catch (FileNotFoundException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+
 			if (bmp == null) {
 				file.delete();
 			} else {
@@ -93,7 +120,32 @@ public class ImageFileCache {
 		return null;
 	}
 
-	public void saveBitmap(Bitmap bm, String url) {
+	private ReentrantLock getLockForFileCache(String filename) {
+		mRWLock.readLock().lock();
+		ReentrantLock value = null;
+		try {
+			value = mLockMap.get(filename);
+			if (value == null) {
+				mRWLock.readLock().unlock();
+				mRWLock.writeLock().lock();
+				try {
+					if (value == null) {
+						value = new ReentrantLock();
+						mLockMap.put(filename, value);
+					}
+					mRWLock.readLock().lock();
+				} finally {
+					mRWLock.writeLock().unlock();
+				}
+
+			}
+		} finally {
+			mRWLock.readLock().unlock();
+		}
+		return value;
+	}
+
+	public void saveBitmap(String url,Bitmap bm) {
 		if (bm == null) {
 			return;
 		}
@@ -101,15 +153,21 @@ public class ImageFileCache {
 		/*
 		 * if (freeSpaceOnSd() < bm.getByteCount()) { return; }
 		 */
-		String filename = url.substring(url.lastIndexOf("/") + 1)
-				+ CACHE_SUFFIX;
-		File file = new File(path, filename);
+		String prefix = url.substring(url.lastIndexOf("/") + 1);
+
+		File tempFile = new File(path, prefix + TEMP_SUFFIX);
+		File cacheFile = new File(path, prefix + CACHE_SUFFIX);
 		OutputStream out = null;
+		ReentrantLock lock = getLockForFileCache(prefix + CACHE_SUFFIX);
 		try {
-			out = new FileOutputStream(file);
+			lock.lock();
+			out = new FileOutputStream(tempFile);
 			bm.compress(Bitmap.CompressFormat.JPEG, 100, out);
 			out.flush();
-			cacheSize +=file.length();
+			if (tempFile.renameTo(cacheFile)) {
+				mCacheSize.addAndGet(tempFile.length());
+				LogUtils.info("save as file success");
+			}
 		} catch (FileNotFoundException e) {
 			e.printStackTrace();
 		} catch (IOException e) {
@@ -118,6 +176,7 @@ public class ImageFileCache {
 		} catch (Exception e) {
 			e.printStackTrace();
 		} finally {
+			lock.unlock();
 			if (out != null) {
 				try {
 					out.close();
@@ -130,33 +189,34 @@ public class ImageFileCache {
 			}
 
 		}
+
 		checkCache();
 
 	}
 
 	private void countCacheSize() {
+		mCacheSize = new AtomicLong(0);
 		File dir = new File(path);
 		File[] files = dir.listFiles();
 		if (files == null || files.length == 0) {
 			return;
 		}
-		cacheSize = 0;
+
 		for (int i = 0; i < files.length; i++) {
 			if (files[i].getName().contains(CACHE_SUFFIX)) {
-				cacheSize += files[i].length();
+				mCacheSize.addAndGet(files[i].length());
 			}
 		}
 	}
 
 	private void checkCache() {
-		if (cacheSize > CACHE_SIZE) {
-			// 删除文件数的40%
+		if (mCacheSize.get() > CACHE_SIZE) {
 			File dir = new File(path);
 			File[] files = dir.listFiles();
 			if (files == null || files.length == 0) {
 				return;
 			}
-			int removeFactor = (int) ((0.4 * files.length) + 1);
+
 			Arrays.sort(files, new Comparator<File>() {
 
 				@Override
@@ -171,12 +231,15 @@ public class ImageFileCache {
 					}
 				}
 			});
-			for (int i = 0; i < removeFactor; i++) {
-				if (files[i].getName().contains(CACHE_SUFFIX)) {	
-					cacheSize-=files[i].length();
-					files[i].delete();
+			for (int i = 0, len = files.length; i < len
+					&& mCacheSize.get() > RETAIN_FACTOR; i++) {
+				if (files[i].getName().contains(CACHE_SUFFIX)) {
+					if (files[i].delete()) {
+						mCacheSize.addAndGet(-files[i].length());
+					}
 				}
 			}
+			LogUtils.info("clear file cache");
 		}
 	}
 

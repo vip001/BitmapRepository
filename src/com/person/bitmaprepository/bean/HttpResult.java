@@ -4,9 +4,18 @@ import java.io.Serializable;
 
 public class HttpResult<T> implements Serializable {
 	private boolean isSuccess;
+	private String url;
 	private String errorMsg;
 	private int errorCode;
 	private T result;
+
+	public String getUrl() {
+		return url;
+	}
+
+	public void setUrl(String url) {
+		this.url = url;
+	}
 
 	public boolean isSuccess() {
 		return isSuccess;

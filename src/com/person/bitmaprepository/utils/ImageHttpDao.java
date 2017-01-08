@@ -20,19 +20,19 @@ public class ImageHttpDao {
 	private int reqheight;
 	private int samplesize;
 
-	public static ImageHttpDao getInstance(Context context) {
+	public static ImageHttpDao getInstance() {
 		if (dao == null) {
 			synchronized (ImageHttpDao.class) {
 				if (dao == null) {
-					dao = new ImageHttpDao(context);
+					dao = new ImageHttpDao();
 				}
 			}
 		}
 		return dao;
 	}
 
-	private ImageHttpDao(Context context) {
-		DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+	private ImageHttpDao() {
+		DisplayMetrics metrics = HardWareUtils.getDisplayMetrics();
 		screenwidth = metrics.widthPixels;
 		screenheight = metrics.heightPixels;
 		reqwidth = screenwidth;
